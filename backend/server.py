@@ -12,8 +12,13 @@ from datetime import datetime, timedelta
 from enum import Enum
 import asyncio
 
-# Import emergentintegrations for LLM
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+# Try to import emergentintegrations, but handle gracefully if not available
+try:
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    EMERGENT_AVAILABLE = True
+except ImportError:
+    EMERGENT_AVAILABLE = False
+    print("WARNING: emergentintegrations not available. AI email generation will be disabled.")
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -201,8 +206,11 @@ class AnalyticsResponse(BaseModel):
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', 'YOUR_OPENAI_API_KEY_HERE')
 
 # Helper functions
-async def get_llm_chat(session_id: str, system_message: str) -> LlmChat:
+async def get_llm_chat(session_id: str, system_message: str):
     """Create a new LLM chat instance"""
+    if not EMERGENT_AVAILABLE:
+        raise Exception("emergentintegrations library not available")
+    
     chat = LlmChat(
         api_key=OPENAI_API_KEY,
         session_id=session_id,
@@ -253,7 +261,25 @@ async def update_relationship_strength(contact_id: str):
 # Routes
 @api_router.get("/")
 async def root():
-    return {"message": "NetworkingAI API is running"}
+    return {"message": "NetworkingAI API is running", "emergent_available": EMERGENT_AVAILABLE}
+
+@api_router.get("/health")
+async def health_check():
+    """Comprehensive health check endpoint"""
+    try:
+        # Test database connection
+        await db.list_collection_names()
+        db_status = "healthy"
+    except Exception as e:
+        db_status = f"unhealthy: {str(e)}"
+    
+    return {
+        "status": "ok",
+        "database": db_status,
+        "emergent_integrations": EMERGENT_AVAILABLE,
+        "openai_configured": OPENAI_API_KEY != 'YOUR_OPENAI_API_KEY_HERE',
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 # Networking Goals Routes
 @api_router.post("/networking-goals", response_model=NetworkingGoals)
@@ -326,6 +352,14 @@ async def delete_contact(contact_id: str):
 # AI Email Generation Routes
 @api_router.post("/generate-email", response_model=EmailGenerationResponse)
 async def generate_email(request: EmailGenerationRequest):
+    # Check if emergent integrations is available
+    if not EMERGENT_AVAILABLE:
+        return EmailGenerationResponse(
+            subject=f"Re: {request.email_type.replace('_', ' ').title()}",
+            body=f"Hello,\n\nI hope this email finds you well.\n\n[AI email generation unavailable - emergentintegrations library not installed]\n\nBest regards",
+            personalization_notes=["emergentintegrations library not available"]
+        )
+    
     if OPENAI_API_KEY == 'YOUR_OPENAI_API_KEY_HERE':
         raise HTTPException(status_code=400, detail="OpenAI API key not configured. Please add your API key to the .env file.")
     
@@ -403,7 +437,7 @@ async def generate_email(request: EmailGenerationRequest):
         # Fallback response
         return EmailGenerationResponse(
             subject=f"Re: {request.email_type.replace('_', ' ').title()}",
-            body=f"Hi {contact_obj.name},\n\nI hope this email finds you well.\n\n[This is a placeholder - please configure your OpenAI API key for AI-generated content]\n\nBest regards",
+            body=f"Hi {contact_obj.name},\n\nI hope this email finds you well.\n\n[AI generation error - please check configuration]\n\nBest regards",
             personalization_notes=["AI generation failed - using template"]
         )
 
@@ -599,3 +633,20 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+# Add a startup event to check everything is working
+@app.on_event("startup")
+async def startup_event():
+    try:
+        # Test database connection
+        await db.list_collection_names()
+        logger.info("✅ Database connection successful")
+    except Exception as e:
+        logger.error(f"❌ Database connection failed: {e}")
+    
+    if EMERGENT_AVAILABLE:
+        logger.info("✅ emergentintegrations library available")
+    else:
+        logger.warning("⚠️ emergentintegrations library not available - AI features disabled")
+    
+    logger.info("🚀 NetworkingAI API started successfully")
